@@ -1,0 +1,50 @@
+{
+  "name": "qq-farm-query-plugin",
+  "plugin": "QQ农场查询插件",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.mjs",
+  "description": "QQ农场状态查询插件 - 扫码登录、查看农场状态、背包物品、成熟时间等",
+  "author": "鲁班",
+  "license": "MIT",
+  "keywords": [
+    "napcat",
+    "plugin",
+    "qq",
+    "farm",
+    "农场"
+  ],
+  "napcat": {
+    "tags": [
+      "游戏",
+      "工具"
+    ],
+    "minVersion": "4.14.0",
+    "homepage": ""
+  },
+  "dependencies": {
+    "napcat-types": "0.0.16",
+    "axios": "^1.6.0",
+    "ws": "^8.19.0",
+    "protobufjs": "^7.2.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.3.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.19.33",
+    "napcat-plugin-debug-cli": "^1.2.8",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.1",
+    "ws": "^8.19.0"
+  },
+  "scripts": {
+    "build": "vite build",
+    "build:webui": "cd src/webui && pnpm install && pnpm run build",
+    "dev:webui": "cd src/webui && pnpm run dev",
+    "watch": "vite build --watch",
+    "dev": "vite build --watch",
+    "push": "vite build",
+    "deploy": "vite build",
+    "typecheck": "tsc --noEmit"
+  }
+}
