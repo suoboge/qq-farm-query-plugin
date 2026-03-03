@@ -43,6 +43,12 @@ export interface PluginConfig {
     seedListCommand: string;
     /** 出售命令 */
     sellCommand: string;
+    /** 除草命令 */
+    weedCommand: string;
+    /** 除虫命令 */
+    bugCommand: string;
+    /** 菜单命令 */
+    menuCommand: string;
     /** 同一命令请求冷却时间（秒），0 表示不限制 */
     cooldownSeconds: number;
     /** 按群的单独配置 */

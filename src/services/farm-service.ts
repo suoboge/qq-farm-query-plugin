@@ -1422,3 +1422,123 @@ export async function sellItems(userId: string, itemId: number, count: number): 
         return { success: false, message: `出售失败: ${e}` };
     }
 }
+
+/**
+ * 除草
+ */
+export async function weedOut(userId: string, landIds?: number[]): Promise<OperationResult> {
+    const session = getUserSession(userId);
+
+    if (!session.loginState.isLoggedIn) {
+        throw new Error('请先登录');
+    }
+
+    if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+        return { success: false, message: '未连接到服务器' };
+    }
+
+    try {
+        const weedOutReqType = getType('WeedOutRequest');
+        if (!weedOutReqType) {
+            return { success: false, message: 'WeedOutRequest 类型未加载' };
+        }
+
+        // 如果没有指定土地ID，获取有杂草的土地
+        let targetLandIds = landIds || [];
+        if (targetLandIds.length === 0) {
+            const farmState = await getFarmState(userId);
+            targetLandIds = farmState.lands
+                .filter(l => l.needWeed)
+                .map(l => l.id);
+
+            if (targetLandIds.length === 0) {
+                return { success: false, message: '没有需要除草的土地' };
+            }
+        }
+
+        const request = weedOutReqType.create({
+            land_ids: targetLandIds.map(id => toLong(id)),
+            host_gid: toLong(session.loginState.gid)
+        });
+        const body = Buffer.from(weedOutReqType.encode(request).finish());
+
+        const response = await sendRequest(userId, 'gamepb.plantpb.PlantService', 'WeedOut', body);
+
+        const weedOutReplyType = getType('WeedOutReply');
+        if (weedOutReplyType && response.length > 0) {
+            const reply = weedOutReplyType.toObject(weedOutReplyType.decode(response)) as any;
+            const landCount = reply.land?.length || 0;
+            pluginState.logger.info(`[农场] 除草成功: ${landCount}块土地`);
+            return {
+                success: true,
+                message: `成功为 ${landCount} 块土地除草`,
+                lands: reply.land
+            };
+        }
+
+        return { success: true, message: '除草请求已发送' };
+    } catch (e) {
+        pluginState.logger.warn(`[农场] 除草失败: ${e}`);
+        return { success: false, message: `除草失败: ${e}` };
+    }
+}
+
+/**
+ * 除虫
+ */
+export async function insecticide(userId: string, landIds?: number[]): Promise<OperationResult> {
+    const session = getUserSession(userId);
+
+    if (!session.loginState.isLoggedIn) {
+        throw new Error('请先登录');
+    }
+
+    if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+        return { success: false, message: '未连接到服务器' };
+    }
+
+    try {
+        const insecticideReqType = getType('InsecticideRequest');
+        if (!insecticideReqType) {
+            return { success: false, message: 'InsecticideRequest 类型未加载' };
+        }
+
+        // 如果没有指定土地ID，获取有虫害的土地
+        let targetLandIds = landIds || [];
+        if (targetLandIds.length === 0) {
+            const farmState = await getFarmState(userId);
+            targetLandIds = farmState.lands
+                .filter(l => l.needBug)
+                .map(l => l.id);
+
+            if (targetLandIds.length === 0) {
+                return { success: false, message: '没有需要除虫的土地' };
+            }
+        }
+
+        const request = insecticideReqType.create({
+            land_ids: targetLandIds.map(id => toLong(id)),
+            host_gid: toLong(session.loginState.gid)
+        });
+        const body = Buffer.from(insecticideReqType.encode(request).finish());
+
+        const response = await sendRequest(userId, 'gamepb.plantpb.PlantService', 'Insecticide', body);
+
+        const insecticideReplyType = getType('InsecticideReply');
+        if (insecticideReplyType && response.length > 0) {
+            const reply = insecticideReplyType.toObject(insecticideReplyType.decode(response)) as any;
+            const landCount = reply.land?.length || 0;
+            pluginState.logger.info(`[农场] 除虫成功: ${landCount}块土地`);
+            return {
+                success: true,
+                message: `成功为 ${landCount} 块土地除虫`,
+                lands: reply.land
+            };
+        }
+
+        return { success: true, message: '除虫请求已发送' };
+    } catch (e) {
+        pluginState.logger.warn(`[农场] 除虫失败: ${e}`);
+        return { success: false, message: `除虫失败: ${e}` };
+    }
+}

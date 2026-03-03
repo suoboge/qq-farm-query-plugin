@@ -53,6 +53,11 @@ const typeMappings = [
     ['UpgradeLandReply', 'gamepb.plantpb.UpgradeLandReply'],
     ['UnlockLandRequest', 'gamepb.plantpb.UnlockLandRequest'],
     ['UnlockLandReply', 'gamepb.plantpb.UnlockLandReply'],
+    // 除草/除虫
+    ['WeedOutRequest', 'gamepb.plantpb.WeedOutRequest'],
+    ['WeedOutReply', 'gamepb.plantpb.WeedOutReply'],
+    ['InsecticideRequest', 'gamepb.plantpb.InsecticideRequest'],
+    ['InsecticideReply', 'gamepb.plantpb.InsecticideReply'],
     // 背包
     ['BagRequest', 'gamepb.itempb.BagRequest'],
     ['BagReply', 'gamepb.itempb.BagReply'],

@@ -11,10 +11,10 @@
 import type { OB11Message, OB11PostSendMsg } from 'napcat-types/napcat-onebot';
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { pluginState } from '../core/state';
-import { 
-    startQRLogin, 
-    waitForScan, 
-    getFarmState, 
+import {
+    startQRLogin,
+    waitForScan,
+    getFarmState,
     getBagState,
     getWarehouseState,
     getShopState,
@@ -27,6 +27,8 @@ import {
     upgradeLand,
     unlockLand,
     sellItems,
+    weedOut,
+    insecticide,
     OperationResult
 } from '../services/farm-service';
 import {
@@ -238,10 +240,13 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
         const shopPrefix = pluginState.config.shopCommand || '购买种子';
         const seedListPrefix = pluginState.config.seedListCommand || '种子列表';
         const sellPrefix = pluginState.config.sellCommand || '出售';
-        
+        const weedPrefix = pluginState.config.weedCommand || '除草';
+        const bugPrefix = pluginState.config.bugCommand || '除虫';
+        const menuPrefix = pluginState.config.menuCommand || '菜单';
+
         // 判断命令类型
-        let commandType: 'login' | 'farm' | 'bag' | 'harvest' | 'remove' | 'plant' | 'upgrade' | 'unlock' | 'mature' | 'warehouse' | 'shop' | 'seedlist' | 'sell' | null = null;
-        
+        let commandType: 'login' | 'farm' | 'bag' | 'harvest' | 'remove' | 'plant' | 'upgrade' | 'unlock' | 'mature' | 'warehouse' | 'shop' | 'seedlist' | 'sell' | 'weed' | 'bug' | 'menu' | null = null;
+
         if (rawMessage.includes(loginPrefix)) commandType = 'login';
         else if (rawMessage.includes(farmPrefix)) commandType = 'farm';
         else if (rawMessage.includes(bagPrefix)) commandType = 'bag';
@@ -255,6 +260,9 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
         else if (rawMessage.includes(upgradePrefix)) commandType = 'upgrade';
         else if (rawMessage.includes(unlockPrefix)) commandType = 'unlock';
         else if (rawMessage.includes(maturePrefix)) commandType = 'mature';
+        else if (rawMessage.includes(weedPrefix)) commandType = 'weed';
+        else if (rawMessage.includes(bugPrefix)) commandType = 'bug';
+        else if (rawMessage.includes(menuPrefix)) commandType = 'menu';
         
         if (!commandType) return;
 
@@ -304,6 +312,15 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
                 break;
             case 'sell':
                 await handleSellCommand(ctx, event, userId, groupId, rawMessage);
+                break;
+            case 'weed':
+                await handleWeedCommand(ctx, event, userId, groupId);
+                break;
+            case 'bug':
+                await handleBugCommand(ctx, event, userId, groupId);
+                break;
+            case 'menu':
+                await handleMenuCommand(ctx, event);
                 break;
             default:
                 await handleFarmCommand(ctx, event, userId, groupId);
@@ -830,6 +847,116 @@ async function handleUnlockCommand(
         pluginState.incrementProcessed();
     } catch (error) {
         const errorMsg = error instanceof Error ? error.message : '未知错误';
+        await sendReply(ctx, event, formatErrorMessage(errorMsg));
+    }
+}
+
+/**
+ * 处理除草命令
+ */
+async function handleWeedCommand(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    userId: string,
+    groupId: number | undefined
+): Promise<void> {
+    try {
+        if (!isLoggedIn(userId)) {
+            await sendReply(ctx, event, '请先发送"登录"完成登录');
+            return;
+        }
+
+        await sendReply(ctx, event, '正在除草...');
+        const result = await weedOut(userId);
+
+        if (result.success) {
+            await sendReply(ctx, event, `✅ ${result.message}`);
+        } else {
+            await sendReply(ctx, event, `❌ ${result.message}`);
+        }
+
+        if (groupId) setCooldown(groupId, 'weed');
+        pluginState.incrementProcessed();
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : '未知错误';
+        await sendReply(ctx, event, formatErrorMessage(errorMsg));
+    }
+}
+
+/**
+ * 处理除虫命令
+ */
+async function handleBugCommand(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    userId: string,
+    groupId: number | undefined
+): Promise<void> {
+    try {
+        if (!isLoggedIn(userId)) {
+            await sendReply(ctx, event, '请先发送"登录"完成登录');
+            return;
+        }
+
+        await sendReply(ctx, event, '正在除虫...');
+        const result = await insecticide(userId);
+
+        if (result.success) {
+            await sendReply(ctx, event, `✅ ${result.message}`);
+        } else {
+            await sendReply(ctx, event, `❌ ${result.message}`);
+        }
+
+        if (groupId) setCooldown(groupId, 'bug');
+        pluginState.incrementProcessed();
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : '未知错误';
+        await sendReply(ctx, event, formatErrorMessage(errorMsg));
+    }
+}
+
+/**
+ * 处理菜单命令
+ */
+async function handleMenuCommand(
+    ctx: NapCatPluginContext,
+    event: OB11Message
+): Promise<void> {
+    try {
+        const menuMessage = `📋 QQ农场插件菜单
+
+🔐 登录相关：
+  · 登录 - 扫码登录农场
+
+🔍 查询功能：
+  · 我的农场 - 查看农场状态
+  · 我的背包 - 查看背包物品
+  · 我的仓库 - 查看仓库作物
+  · 成熟时间 - 查看作物成熟时间
+  · 种子列表 - 查看所有种子ID
+
+🌾 操作功能：
+  · 收获 - 收获所有成熟作物
+  · 种植 种子ID - 在空地种植
+  · 铲除 - 铲除枯萎植物
+  · 除草 - 清除杂草
+  · 除虫 - 清除虫害
+
+🏠 土地管理：
+  · 升级土地 土地ID - 升级土地等级
+  · 扩建土地 土地ID - 解锁新土地
+
+💰 交易功能：
+  · 购买种子 - 查看种子商店
+  · 出售 物品ID 数量 - 出售物品
+
+💡 提示：部分功能需要先登录才能使用`;
+
+        await sendReply(ctx, event, menuMessage);
+        pluginState.incrementProcessed();
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : '未知错误';
+        pluginState.logger.error('菜单命令处理失败:', error);
         await sendReply(ctx, event, formatErrorMessage(errorMsg));
     }
 }

@@ -23,6 +23,9 @@ export const DEFAULT_CONFIG: PluginConfig = {
     shopCommand: '购买种子',
     seedListCommand: '种子列表',
     sellCommand: '出售',
+    weedCommand: '除草',
+    bugCommand: '除虫',
+    menuCommand: '菜单',
     cooldownSeconds: 30,
     groupConfigs: {},
     farmServerUrl: 'wss://gate-obt.nqf.qq.com:443/websocket',
@@ -63,6 +66,9 @@ export function buildConfigSchema(ctx: NapCatPluginContext): PluginConfigSchema 
         ctx.NapCatConfig.text('shopCommand', '商店命令', '购买种子', '查看种子商店'),
         ctx.NapCatConfig.text('seedListCommand', '种子列表命令', '种子列表', '查看所有种子ID'),
         ctx.NapCatConfig.text('sellCommand', '出售命令', '出售', '格式: 出售 物品ID 数量'),
+        ctx.NapCatConfig.text('weedCommand', '除草命令', '除草', '清除所有土地的杂草'),
+        ctx.NapCatConfig.text('bugCommand', '除虫命令', '除虫', '清除所有土地的虫害'),
+        ctx.NapCatConfig.text('menuCommand', '菜单命令', '菜单', '显示所有可用命令'),
         // 冷却时间
         ctx.NapCatConfig.number('cooldownSeconds', '冷却时间（秒）', 30, '同一命令请求冷却时间，0 表示不限制'),
         // 登录超时
