@@ -133,9 +133,14 @@ interface UserSession {
     qrSession: QRLoginSession | null;
     qrCheckTimer: NodeJS.Timeout | null;
     isConnected: boolean;
+    heartbeatTimer: NodeJS.Timeout | null;
+    lastHeartbeatResponse: number;
+    reconnectAttempts: number;
 }
 
 const userSessions = new Map<string, UserSession>();
+const HEARTBEAT_INTERVAL = 30000; // 心跳间隔 30秒
+const MAX_RECONNECT_ATTEMPTS = 3; // 最大重连次数
 
 function getUserSession(userId: string): UserSession {
     if (!userSessions.has(userId)) {
@@ -149,7 +154,10 @@ function getUserSession(userId: string): UserSession {
             pendingCallbacks: new Map(),
             qrSession: null,
             qrCheckTimer: null,
-            isConnected: false
+            isConnected: false,
+            heartbeatTimer: null,
+            lastHeartbeatResponse: 0,
+            reconnectAttempts: 0
         });
     }
     return userSessions.get(userId)!;
@@ -195,6 +203,130 @@ function decodeGateMessage(data: Buffer): { meta: any; body: Buffer } | null {
 }
 
 // ==================== WebSocket 通信 ====================
+
+/**
+ * 发送心跳请求
+ */
+async function sendHeartbeat(userId: string): Promise<void> {
+    const session = getUserSession(userId);
+
+    if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+        return;
+    }
+
+    try {
+        const heartbeatReqType = getType('HeartbeatRequest');
+        if (!heartbeatReqType) {
+            pluginState.logger.debug('[心跳] HeartbeatRequest 类型未加载');
+            return;
+        }
+
+        const request = heartbeatReqType.create({
+            gid: toLong(session.loginState.gid),
+            client_version: CLIENT_VERSION,
+        });
+        const body = Buffer.from(heartbeatReqType.encode(request).finish());
+
+        await sendRequest(userId, 'gamepb.userpb.UserService', 'Heartbeat', body);
+        session.lastHeartbeatResponse = Date.now();
+        pluginState.logger.debug('[心跳] 心跳响应正常');
+    } catch (e) {
+        pluginState.logger.warn(`[心跳] 心跳失败: ${e}`);
+    }
+}
+
+/**
+ * 启动心跳定时器
+ */
+function startHeartbeat(userId: string): void {
+    const session = getUserSession(userId);
+
+    // 清除旧定时器
+    if (session.heartbeatTimer) {
+        clearInterval(session.heartbeatTimer);
+        session.heartbeatTimer = null;
+    }
+
+    session.lastHeartbeatResponse = Date.now();
+
+    session.heartbeatTimer = setInterval(() => {
+        // 检查连接状态
+        if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+            pluginState.logger.debug('[心跳] 连接已断开，停止心跳');
+            if (session.heartbeatTimer) {
+                clearInterval(session.heartbeatTimer);
+                session.heartbeatTimer = null;
+            }
+            return;
+        }
+
+        // 检查上次心跳响应时间，超过 90 秒无响应认为连接有问题
+        const timeSinceLastResponse = Date.now() - session.lastHeartbeatResponse;
+        if (timeSinceLastResponse > 90000) {
+            pluginState.logger.warn(`[心跳] 连接可能已断开 (${Math.round(timeSinceLastResponse / 1000)}s 无响应)`);
+            // 标记连接断开，触发重连
+            session.isConnected = false;
+            return;
+        }
+
+        sendHeartbeat(userId);
+    }, HEARTBEAT_INTERVAL);
+
+    pluginState.logger.info('[心跳] 心跳定时器已启动');
+}
+
+/**
+ * 自动重连
+ */
+async function attemptReconnect(userId: string): Promise<boolean> {
+    const session = getUserSession(userId);
+
+    if (!session.loginState.authCode) {
+        pluginState.logger.warn('[重连] 没有 authCode，无法重连');
+        return false;
+    }
+
+    if (session.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        pluginState.logger.warn(`[重连] 已达最大重连次数 (${MAX_RECONNECT_ATTEMPTS})，请重新登录`);
+        session.loginState.isLoggedIn = false;
+        return false;
+    }
+
+    session.reconnectAttempts++;
+    pluginState.logger.info(`[重连] 尝试重连 (${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+
+    try {
+        await ensureProtoLoaded();
+        const ws = await connectWebSocket(userId, session.loginState.authCode);
+        session.ws = ws;
+        session.reconnectAttempts = 0;
+        startHeartbeat(userId);
+        pluginState.logger.info('[重连] 重连成功');
+        return true;
+    } catch (e) {
+        pluginState.logger.warn(`[重连] 重连失败: ${e}`);
+        return false;
+    }
+}
+
+/**
+ * 确保连接可用（自动重连）
+ */
+async function ensureConnection(userId: string): Promise<boolean> {
+    const session = getUserSession(userId);
+
+    // 连接正常
+    if (session.ws && session.ws.readyState === WebSocket.OPEN && session.isConnected) {
+        return true;
+    }
+
+    // 尝试重连
+    if (session.loginState.isLoggedIn && session.loginState.authCode) {
+        return await attemptReconnect(userId);
+    }
+
+    return false;
+}
 
 function sendLogin(userId: string, ws: WebSocket, authCode: string): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -307,7 +439,7 @@ function connectWebSocket(userId: string, authCode: string): Promise<WebSocket> 
 
         ws.on('open', async () => {
             pluginState.logger.info(`[农场] WebSocket 连接打开，准备发送登录请求...`);
-            
+
             if (!loginAttempted) {
                 loginAttempted = true;
                 try {
@@ -315,6 +447,10 @@ function connectWebSocket(userId: string, authCode: string): Promise<WebSocket> 
                     if (!loginResolved) {
                         loginResolved = true;
                         session.ws = ws;
+                        session.authCode = authCode; // 保存 authCode 用于重连
+                        session.isConnected = true;
+                        session.reconnectAttempts = 0;
+                        startHeartbeat(userId); // 启动心跳
                         resolve(ws);
                     }
                 } catch (e) {
@@ -359,6 +495,20 @@ function connectWebSocket(userId: string, authCode: string): Promise<WebSocket> 
         ws.on('close', (code) => {
             session.isConnected = false;
             pluginState.logger.info(`[农场] WebSocket 连接关闭 (code: ${code})`);
+
+            // 清理心跳定时器
+            if (session.heartbeatTimer) {
+                clearInterval(session.heartbeatTimer);
+                session.heartbeatTimer = null;
+            }
+
+            // 自动重连：延迟 5 秒后重试
+            if (session.loginState.isLoggedIn && session.authCode) {
+                pluginState.logger.info('[农场] 5 秒后尝试自动重连...');
+                setTimeout(() => {
+                    attemptReconnect(userId);
+                }, 5000);
+            }
         });
 
         ws.on('error', (err) => {
@@ -641,130 +791,133 @@ export async function getFarmState(userId: string): Promise<FarmState> {
         throw new Error('请先登录');
     }
 
+    // 确保连接可用（自动重连）
+    const connected = await ensureConnection(userId);
+    if (!connected) {
+        pluginState.logger.warn('[农场] 无法建立连接，使用模拟数据');
+        return generateMockFarmState(session.loginState);
+    }
+
     // 尝试获取真实数据
-    if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-        try {
-            // 构建 AllLandsRequest
-            const allLandsReqType = getType('AllLandsRequest');
-            if (allLandsReqType) {
-                const request = allLandsReqType.create({
-                    land_ids: [],
-                    host_gid: toLong(session.loginState.gid),
-                });
-                const body = Buffer.from(allLandsReqType.encode(request).finish());
-                
-                // 发送请求
-                const response = await sendRequest(userId, 'gamepb.plantpb.PlantService', 'AllLands', body);
-                
-                // 解析响应
-                const allLandsReplyType = getType('AllLandsReply');
-                if (allLandsReplyType && response.length > 0) {
-                    const reply = allLandsReplyType.toObject(allLandsReplyType.decode(response)) as any;
-                    
-                    if (reply.lands && reply.lands.length > 0) {
-                        const lands: LandInfo[] = [];
-                        const summary: FarmSummary = {
-                            harvestable: 0,
-                            growing: 0,
-                            empty: 0,
-                            dead: 0,
-                            needWater: 0,
-                            needWeed: 0,
-                            needBug: 0
-                        };
+    try {
+        // 构建 AllLandsRequest
+        const allLandsReqType = getType('AllLandsRequest');
+        if (allLandsReqType) {
+            const request = allLandsReqType.create({
+                land_ids: [],
+                host_gid: toLong(session.loginState.gid),
+            });
+            const body = Buffer.from(allLandsReqType.encode(request).finish());
 
-                        const nowSec = Math.floor(Date.now() / 1000);
+            // 发送请求
+            const response = await sendRequest(userId, 'gamepb.plantpb.PlantService', 'AllLands', body);
 
-                        for (const land of reply.lands) {
-                            const id = toNum(land.id);
-                            const unlocked = !!land.unlocked;
-                            let status = 'locked';
-                            let plantName = '';
-                            let phaseName = '';
-                            let matureInSec = 0;
-                            let needWater = false;
-                            let needWeed = false;
-                            let needBug = false;
-                            let seedId = 0;
+            // 解析响应
+            const allLandsReplyType = getType('AllLandsReply');
+            if (allLandsReplyType && response.length > 0) {
+                const reply = allLandsReplyType.toObject(allLandsReplyType.decode(response)) as any;
 
-                            if (unlocked) {
-                                const plant = land.plant;
-                                if (!plant || !plant.phases || plant.phases.length === 0) {
-                                    status = 'empty';
-                                    summary.empty++;
+                if (reply.lands && reply.lands.length > 0) {
+                    const lands: LandInfo[] = [];
+                    const summary: FarmSummary = {
+                        harvestable: 0,
+                        growing: 0,
+                        empty: 0,
+                        dead: 0,
+                        needWater: 0,
+                        needWeed: 0,
+                        needBug: 0
+                    };
+
+                    const nowSec = Math.floor(Date.now() / 1000);
+
+                    for (const land of reply.lands) {
+                        const id = toNum(land.id);
+                        const unlocked = !!land.unlocked;
+                        let status = 'locked';
+                        let plantName = '';
+                        let phaseName = '';
+                        let matureInSec = 0;
+                        let needWater = false;
+                        let needWeed = false;
+                        let needBug = false;
+                        let seedId = 0;
+
+                        if (unlocked) {
+                            const plant = land.plant;
+                            if (!plant || !plant.phases || plant.phases.length === 0) {
+                                status = 'empty';
+                                summary.empty++;
+                            } else {
+                                // 获取当前阶段
+                                const currentPhase = plant.phases.find((p: any) => {
+                                    const beginTime = toNum(p.begin_time);
+                                    return beginTime > 0 && beginTime <= nowSec;
+                                }) || plant.phases[0];
+
+                                const phaseVal = currentPhase ? toNum(currentPhase.phase) : 0;
+
+                                if (phaseVal === PlantPhase.MATURE) {
+                                    status = 'harvestable';
+                                    summary.harvestable++;
+                                } else if (phaseVal === PlantPhase.DEAD) {
+                                    status = 'dead';
+                                    summary.dead++;
                                 } else {
-                                    // 获取当前阶段
-                                    const currentPhase = plant.phases.find((p: any) => {
-                                        const beginTime = toNum(p.begin_time);
-                                        return beginTime > 0 && beginTime <= nowSec;
-                                    }) || plant.phases[0];
-                                    
-                                    const phaseVal = currentPhase ? toNum(currentPhase.phase) : 0;
-                                    
-                                    if (phaseVal === PlantPhase.MATURE) {
-                                        status = 'harvestable';
-                                        summary.harvestable++;
-                                    } else if (phaseVal === PlantPhase.DEAD) {
-                                        status = 'dead';
-                                        summary.dead++;
-                                    } else {
-                                        status = 'growing';
-                                        summary.growing++;
-                                    }
-
-                                    plantName = plant.name || getPlantName(seedId);
-                                    phaseName = PHASE_NAMES[phaseVal] || '未知';
-                                    seedId = toNum(plant.id || plant.seed_id || 0);
-
-                                    // 计算成熟时间
-                                    const maturePhase = plant.phases.find((p: any) => toNum(p.phase) === PlantPhase.MATURE);
-                                    if (maturePhase) {
-                                        const matureBegin = toNum(maturePhase.begin_time);
-                                        matureInSec = Math.max(0, matureBegin - nowSec);
-                                    }
-
-                                    // 检查状态
-                                    needWater = toNum(plant.dry_num) > 0;
-                                    needWeed = plant.weed_owners && plant.weed_owners.length > 0;
-                                    needBug = plant.insect_owners && plant.insect_owners.length > 0;
-                                    
-                                    if (needWater) summary.needWater++;
-                                    if (needWeed) summary.needWeed++;
-                                    if (needBug) summary.needBug++;
+                                    status = 'growing';
+                                    summary.growing++;
                                 }
-                            }
 
-                            lands.push({
-                                id,
-                                unlocked,
-                                status,
-                                plantName,
-                                seedId,
-                                seedImage: '',
-                                phaseName,
-                                matureInSec,
-                                needWater,
-                                needWeed,
-                                needBug,
-                                level: toNum(land.level)
-                            });
+                                plantName = plant.name || getPlantName(seedId);
+                                phaseName = PHASE_NAMES[phaseVal] || '未知';
+                                seedId = toNum(plant.id || plant.seed_id || 0);
+
+                                // 计算成熟时间
+                                const maturePhase = plant.phases.find((p: any) => toNum(p.phase) === PlantPhase.MATURE);
+                                if (maturePhase) {
+                                    const matureBegin = toNum(maturePhase.begin_time);
+                                    matureInSec = Math.max(0, matureBegin - nowSec);
+                                }
+
+                                // 检查状态
+                                needWater = toNum(plant.dry_num) > 0;
+                                needWeed = plant.weed_owners && plant.weed_owners.length > 0;
+                                needBug = plant.insect_owners && plant.insect_owners.length > 0;
+
+                                if (needWater) summary.needWater++;
+                                if (needWeed) summary.needWeed++;
+                                if (needBug) summary.needBug++;
+                            }
                         }
 
-                        pluginState.logger.info(`[农场] 获取真实农场数据成功: ${lands.length}块土地`);
-                        return {
-                            user: session.loginState,
-                            lands,
-                            summary,
-                            queryTime: Date.now()
-                        };
+                        lands.push({
+                            id,
+                            unlocked,
+                            status,
+                            plantName,
+                            seedId,
+                            seedImage: '',
+                            phaseName,
+                            matureInSec,
+                            needWater,
+                            needWeed,
+                            needBug,
+                            level: toNum(land.level)
+                        });
                     }
+
+                    pluginState.logger.info(`[农场] 获取真实农场数据成功: ${lands.length}块土地`);
+                    return {
+                        user: session.loginState,
+                        lands,
+                        summary,
+                        queryTime: Date.now()
+                    };
                 }
-            } else {
-                pluginState.logger.warn('[农场] AllLandsRequest 类型未加载');
             }
-        } catch (e) {
-            pluginState.logger.warn(`[农场] 获取真实农场数据失败: ${e}`);
         }
+    } catch (e) {
+        pluginState.logger.warn(`[农场] 获取真实农场数据失败: ${e}`);
     }
 
     // 回退到模拟数据（带标记）
@@ -864,9 +1017,15 @@ export async function getBagState(userId: string): Promise<BagState> {
         throw new Error('请先登录');
     }
 
+    // 确保连接可用（自动重连）
+    const connected = await ensureConnection(userId);
+    if (!connected) {
+        pluginState.logger.warn('[农场] 无法建立连接，使用模拟背包数据');
+        return generateMockBagState(session.loginState);
+    }
+
     // 尝试获取真实数据
-    if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-        try {
+    try {
             // 构建 BagRequest
             const bagReqType = getType('BagRequest');
             if (bagReqType) {
@@ -932,13 +1091,10 @@ export async function getBagState(userId: string): Promise<BagState> {
                         queryTime: Date.now()
                     };
                 }
-            } else {
-                pluginState.logger.warn('[农场] BagRequest 类型未加载');
             }
         } catch (e) {
             pluginState.logger.warn(`[农场] 获取真实背包数据失败: ${e}`);
         }
-    }
 
     // 回退到模拟数据
     pluginState.logger.warn('[农场] 使用模拟背包数据');
