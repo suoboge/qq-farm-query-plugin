@@ -28,6 +28,7 @@ import { buildConfigSchema } from './config';
 import { pluginState } from './core/state';
 import { handleMessage } from './handlers/message-handler';
 import { registerApiRoutes } from './services/api-service';
+import { cleanup as cleanupFarmSessions } from './services/farm-service';
 import type { PluginConfig } from './types';
 
 // ==================== 配置 UI Schema ====================
@@ -86,6 +87,8 @@ export const plugin_onevent: PluginModule['plugin_onevent'] = async (ctx, event)
  */
 export const plugin_cleanup: PluginModule['plugin_cleanup'] = async (ctx) => {
     try {
+        // 清理农场会话和定时器
+        cleanupFarmSessions();
         pluginState.cleanup();
         ctx.logger.info('QQ农场查询插件已卸载');
     } catch (e) {

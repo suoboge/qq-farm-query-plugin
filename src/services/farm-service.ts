@@ -205,6 +205,20 @@ function decodeGateMessage(data: Buffer): { meta: any; body: Buffer } | null {
 // ==================== WebSocket 通信 ====================
 
 /**
+ * 安全获取 logger（防止插件未初始化时出错）
+ */
+function safeLog(level: 'info' | 'warn' | 'error' | 'debug', message: string): void {
+    try {
+        const logger = pluginState.logger;
+        if (logger) {
+            logger[level](message);
+        }
+    } catch {
+        // 忽略日志错误
+    }
+}
+
+/**
  * 发送心跳请求
  */
 async function sendHeartbeat(userId: string): Promise<void> {
@@ -217,7 +231,7 @@ async function sendHeartbeat(userId: string): Promise<void> {
     try {
         const heartbeatReqType = getType('HeartbeatRequest');
         if (!heartbeatReqType) {
-            pluginState.logger.debug('[心跳] HeartbeatRequest 类型未加载');
+            safeLog('debug', '[心跳] HeartbeatRequest 类型未加载');
             return;
         }
 
@@ -229,9 +243,9 @@ async function sendHeartbeat(userId: string): Promise<void> {
 
         await sendRequest(userId, 'gamepb.userpb.UserService', 'Heartbeat', body);
         session.lastHeartbeatResponse = Date.now();
-        pluginState.logger.debug('[心跳] 心跳响应正常');
+        safeLog('debug', '[心跳] 心跳响应正常');
     } catch (e) {
-        pluginState.logger.warn(`[心跳] 心跳失败: ${e}`);
+        safeLog('warn', `[心跳] 心跳失败: ${e}`);
     }
 }
 
@@ -250,29 +264,43 @@ function startHeartbeat(userId: string): void {
     session.lastHeartbeatResponse = Date.now();
 
     session.heartbeatTimer = setInterval(() => {
-        // 检查连接状态
-        if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
-            pluginState.logger.debug('[心跳] 连接已断开，停止心跳');
-            if (session.heartbeatTimer) {
-                clearInterval(session.heartbeatTimer);
-                session.heartbeatTimer = null;
+        try {
+            // 检查 pluginState 是否已初始化
+            if (!pluginState || !pluginState.ctx) {
+                // 插件已卸载，停止心跳
+                if (session.heartbeatTimer) {
+                    clearInterval(session.heartbeatTimer);
+                    session.heartbeatTimer = null;
+                }
+                return;
             }
-            return;
-        }
 
-        // 检查上次心跳响应时间，超过 90 秒无响应认为连接有问题
-        const timeSinceLastResponse = Date.now() - session.lastHeartbeatResponse;
-        if (timeSinceLastResponse > 90000) {
-            pluginState.logger.warn(`[心跳] 连接可能已断开 (${Math.round(timeSinceLastResponse / 1000)}s 无响应)`);
-            // 标记连接断开，触发重连
-            session.isConnected = false;
-            return;
-        }
+            // 检查连接状态
+            if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+                safeLog('debug', '[心跳] 连接已断开，停止心跳');
+                if (session.heartbeatTimer) {
+                    clearInterval(session.heartbeatTimer);
+                    session.heartbeatTimer = null;
+                }
+                return;
+            }
 
-        sendHeartbeat(userId);
+            // 检查上次心跳响应时间，超过 90 秒无响应认为连接有问题
+            const timeSinceLastResponse = Date.now() - session.lastHeartbeatResponse;
+            if (timeSinceLastResponse > 90000) {
+                safeLog('warn', `[心跳] 连接可能已断开 (${Math.round(timeSinceLastResponse / 1000)}s 无响应)`);
+                // 标记连接断开，触发重连
+                session.isConnected = false;
+                return;
+            }
+
+            sendHeartbeat(userId);
+        } catch (e) {
+            // 忽略错误，可能是插件已卸载
+        }
     }, HEARTBEAT_INTERVAL);
 
-    pluginState.logger.info('[心跳] 心跳定时器已启动');
+    safeLog('info', '[心跳] 心跳定时器已启动');
 }
 
 /**
@@ -282,18 +310,18 @@ async function attemptReconnect(userId: string): Promise<boolean> {
     const session = getUserSession(userId);
 
     if (!session.loginState.authCode) {
-        pluginState.logger.warn('[重连] 没有 authCode，无法重连');
+        safeLog('warn', '[重连] 没有 authCode，无法重连');
         return false;
     }
 
     if (session.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        pluginState.logger.warn(`[重连] 已达最大重连次数 (${MAX_RECONNECT_ATTEMPTS})，请重新登录`);
+        safeLog('warn', `[重连] 已达最大重连次数 (${MAX_RECONNECT_ATTEMPTS})，请重新登录`);
         session.loginState.isLoggedIn = false;
         return false;
     }
 
     session.reconnectAttempts++;
-    pluginState.logger.info(`[重连] 尝试重连 (${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+    safeLog('info', `[重连] 尝试重连 (${session.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
 
     try {
         await ensureProtoLoaded();
@@ -301,10 +329,10 @@ async function attemptReconnect(userId: string): Promise<boolean> {
         session.ws = ws;
         session.reconnectAttempts = 0;
         startHeartbeat(userId);
-        pluginState.logger.info('[重连] 重连成功');
+        safeLog('info', '[重连] 重连成功');
         return true;
     } catch (e) {
-        pluginState.logger.warn(`[重连] 重连失败: ${e}`);
+        safeLog('warn', `[重连] 重连失败: ${e}`);
         return false;
     }
 }
@@ -1266,6 +1294,31 @@ export function logout(userId: string): void {
     session.qrSession = null;
     session.isConnected = false;
     pluginState.logger.info(`[农场] 用户 ${userId} 已登出`);
+}
+
+/**
+ * 清理所有会话和定时器（插件卸载时调用）
+ */
+export function cleanup(): void {
+    for (const [userId, session] of userSessions) {
+        // 清理心跳定时器
+        if (session.heartbeatTimer) {
+            clearInterval(session.heartbeatTimer);
+            session.heartbeatTimer = null;
+        }
+        // 清理扫码检查定时器
+        if (session.qrCheckTimer) {
+            clearInterval(session.qrCheckTimer);
+            session.qrCheckTimer = null;
+        }
+        // 关闭 WebSocket
+        if (session.ws) {
+            session.ws.removeAllListeners();
+            session.ws.close();
+            session.ws = null;
+        }
+    }
+    userSessions.clear();
 }
 
 // ==================== 农场操作 ====================
