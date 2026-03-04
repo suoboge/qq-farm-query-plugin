@@ -433,9 +433,10 @@ function connectWebSocket(userId: string, authCode: string): Promise<WebSocket> 
         });
 
         ws.binaryType = 'arraybuffer';
-        
+
         let loginResolved = false;
         let loginAttempted = false;
+        let shouldReconnect = true; // 是否应该重连
 
         ws.on('open', async () => {
             pluginState.logger.info(`[农场] WebSocket 连接打开，准备发送登录请求...`);
@@ -502,6 +503,18 @@ function connectWebSocket(userId: string, authCode: string): Promise<WebSocket> 
                 session.heartbeatTimer = null;
             }
 
+            // 认证错误（400等）不进行重连，清除登录状态
+            if (!shouldReconnect) {
+                pluginState.logger.warn('[农场] 认证失败，清除登录状态');
+                session.loginState.isLoggedIn = false;
+                session.loginState.gid = 0;
+                session.loginState.name = '';
+                session.loginState.gold = 0;
+                session.loginState.exp = 0;
+                session.authCode = '';
+                return;
+            }
+
             // 自动重连：延迟 5 秒后重试
             if (session.loginState.isLoggedIn && session.authCode) {
                 pluginState.logger.info('[农场] 5 秒后尝试自动重连...');
@@ -513,6 +526,19 @@ function connectWebSocket(userId: string, authCode: string): Promise<WebSocket> 
 
         ws.on('error', (err) => {
             pluginState.logger.error(`[农场] WebSocket 错误:`, err.message);
+
+            // 检查是否是认证错误（400）
+            const message = err.message || '';
+            const match = message.match(/Unexpected server response:\s*(\d+)/i);
+            if (match) {
+                const code = Number.parseInt(match[1], 10) || 0;
+                if (code === 400 || code === 401 || code === 403) {
+                    // 认证错误，不重连
+                    shouldReconnect = false;
+                    pluginState.logger.warn(`[农场] 认证失败 (code: ${code})，需要重新登录`);
+                }
+            }
+
             if (!loginResolved) {
                 loginResolved = true;
                 reject(err);
@@ -749,23 +775,45 @@ export async function waitForScan(userId: string, timeoutMs: number = 120000): P
                         const ws = await connectWebSocket(userId, authCode);
                         session.ws = ws;
                         session.authCode = authCode;
-                        
+
                         pluginState.logger.info(`[农场] 用户 ${userId} 登录成功: ${status.nickname}`);
                         resolve(session.loginState);
                     } catch (e) {
-                        // 连接失败，但登录可能已成功，使用备用状态
-                        session.loginState = {
-                            isLoggedIn: true,
-                            gid: status.uin || 0,
-                            name: status.nickname || '农场主',
-                            level: 1,
-                            gold: 0,
-                            exp: 0,
-                            loginTime: Date.now(),
-                            authCode
-                        };
-                        pluginState.logger.warn(`[农场] WebSocket连接失败，使用备用模式: ${e}`);
-                        resolve(session.loginState);
+                        // 检查是否是认证错误
+                        const message = e instanceof Error ? e.message : String(e);
+                        const isAuthError = message.includes('400') || message.includes('401') || message.includes('403');
+
+                        if (isAuthError) {
+                            // 认证失败，清除登录状态
+                            session.loginState = {
+                                isLoggedIn: false,
+                                gid: 0,
+                                name: '',
+                                level: 0,
+                                gold: 0,
+                                exp: 0,
+                                loginTime: 0,
+                                authCode: ''
+                            };
+                            session.authCode = '';
+                            pluginState.logger.warn(`[农场] 认证失败: ${message}`);
+                            reject(new Error('认证失败，请重新扫码登录'));
+                        } else {
+                            // 其他错误，使用备用状态（但标记连接失败）
+                            session.loginState = {
+                                isLoggedIn: true,
+                                gid: status.uin || 0,
+                                name: status.nickname || '农场主',
+                                level: 1,
+                                gold: 0,
+                                exp: 0,
+                                loginTime: Date.now(),
+                                authCode
+                            };
+                            session.isConnected = false;
+                            pluginState.logger.warn(`[农场] WebSocket连接失败，使用备用模式: ${e}`);
+                            resolve(session.loginState);
+                        }
                     }
                 } else if (status.status === 'Used') {
                     clearInterval(checkInterval);
